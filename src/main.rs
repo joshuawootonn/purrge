@@ -21,7 +21,7 @@ struct Args {
 }
 
 fn main() {
-    let args = Args::parse();
+    // let args = Args::parse();
 
     let mut builder = GlobSetBuilder::new();
 
@@ -37,13 +37,14 @@ fn main() {
     builder2.add(Glob::new("**/.git/*").unwrap());
     let dont_match_glob = builder2.build().unwrap();
 
-    let walker = WalkDir::new("../").into_iter();
+    // TODO: don't keep walking when in excluded directory or hidden directory
+    let walker = WalkDir::new(".").into_iter();
     for entry in walker {
         let entry = entry.unwrap();
         let a = match_these_glob.matches(entry.path()).len();
         let b = dont_match_glob.matches(entry.path()).len();
 
-        if (a > 0 && b == 0) {
+        if a > 0 && b == 0 {
             println!("{:?}", entry.path());
         }
     }
