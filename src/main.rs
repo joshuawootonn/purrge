@@ -1,27 +1,38 @@
 use globset::{Glob, GlobSetBuilder};
-use std::{env, path::Path};
+use std::{env, error::Error, path::PathBuf};
 
-use clap::Parser;
-use walkdir::{DirEntry, WalkDir};
+use clap::{Parser, ValueHint};
+use walkdir::WalkDir;
 
-/// Simple program to greet a person
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Name of the person to greet
-    #[arg(short, long)]
-    name: String,
+    #[arg(
+        id = "directory",   
+        help = "The directory which to search",
+        long,
+        short = 'd',
+        conflicts_with = "directory_pos",
+        required_unless_present = "directory_pos",
+        value_hint = ValueHint::FilePath,
+    )]
+    pub directory: Option<PathBuf>,
 
-    /// Number of times to greet
-    #[arg(short, long, default_value_t = 1)]
-    count: u8,
-
-    #[arg(short, long, default_value_t = env::current_dir().unwrap().as_path().display().to_string())]
-    directory: String,
+    #[arg(
+        id = "directory_pos",
+        help = "The directory to search - (positional)",
+        conflicts_with = "directory",
+        required_unless_present = "directory",
+        value_hint = ValueHint::FilePath
+    )]
+    pub directory_pos: Option<PathBuf>,
 }
 
 fn main() {
-    // let args = Args::parse();
+    let args = Args::parse();
+    let input = input_from_either(args.directory, args.directory_pos).unwrap();
+
+    println!("input: {:?}", input);
 
     let mut builder = GlobSetBuilder::new();
 
@@ -38,7 +49,7 @@ fn main() {
     let dont_match_glob = builder2.build().unwrap();
 
     // TODO: don't keep walking when in excluded directory or hidden directory
-    let walker = WalkDir::new(".").into_iter();
+    let walker = WalkDir::new(input.to_str().unwrap()).into_iter();
     for entry in walker {
         let entry = entry.unwrap();
         let a = match_these_glob.matches(entry.path()).len();
@@ -47,5 +58,18 @@ fn main() {
         if a > 0 && b == 0 {
             println!("{:?}", entry.path());
         }
+    }
+}
+
+pub fn input_from_either(
+    path_a: Option<PathBuf>,
+    path_b: Option<PathBuf>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    match path_a {
+        Some(path_a) => Ok(path_a),
+        None => match path_b {
+            Some(path_b) => Ok(path_b),
+            None => panic!("No input file provided. See `purrge --help`"),
+        },
     }
 }
