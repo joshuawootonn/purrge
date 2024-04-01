@@ -1,38 +1,20 @@
+use configuration::get_configuration;
 use globset::{Glob, GlobSetBuilder};
-use std::{env, error::Error, path::PathBuf};
-
-use clap::{Parser, ValueHint};
 use walkdir::WalkDir;
 
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Args {
-    #[arg(
-        id = "directory",   
-        help = "The directory which to search",
-        long,
-        short = 'd',
-        conflicts_with = "directory_pos",
-        required_unless_present = "directory_pos",
-        value_hint = ValueHint::FilePath,
-    )]
-    pub directory: Option<PathBuf>,
+use std::io::{self, stdout};
 
-    #[arg(
-        id = "directory_pos",
-        help = "The directory to search - (positional)",
-        conflicts_with = "directory",
-        required_unless_present = "directory",
-        value_hint = ValueHint::FilePath
-    )]
-    pub directory_pos: Option<PathBuf>,
-}
+use crossterm::{
+    event::{self, Event, KeyCode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    ExecutableCommand,
+};
+use ratatui::{prelude::*, widgets::*};
 
-fn main() {
-    let args = Args::parse();
-    let input = input_from_either(args.directory, args.directory_pos).unwrap();
+mod configuration;
 
-    println!("input: {:?}", input);
+fn main() -> io::Result<()> {
+    let configuration = get_configuration();
 
     let mut builder = GlobSetBuilder::new();
 
@@ -49,7 +31,8 @@ fn main() {
     let dont_match_glob = builder2.build().unwrap();
 
     // TODO: don't keep walking when in excluded directory or hidden directory
-    let walker = WalkDir::new(input.to_str().unwrap()).into_iter();
+    let walker = WalkDir::new(configuration.directory.to_str().unwrap()).into_iter();
+    let mut list = Vec::new();
     for entry in walker {
         let entry = entry.unwrap();
         let a = match_these_glob.matches(entry.path()).len();
@@ -57,19 +40,49 @@ fn main() {
 
         if a > 0 && b == 0 {
             println!("{:?}", entry.path());
+            list.push(entry.path().to_path_buf());
         }
     }
+
+    enable_raw_mode()?;
+    stdout().execute(EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+
+    let mut should_quit = false;
+    while !should_quit {
+        terminal.draw(ui)?;
+        should_quit = handle_events()?;
+    }
+
+    disable_raw_mode()?;
+    stdout().execute(LeaveAlternateScreen)?;
+    Ok(())
 }
 
-pub fn input_from_either(
-    path_a: Option<PathBuf>,
-    path_b: Option<PathBuf>,
-) -> Result<PathBuf, Box<dyn Error>> {
-    match path_a {
-        Some(path_a) => Ok(path_a),
-        None => match path_b {
-            Some(path_b) => Ok(path_b),
-            None => panic!("No input file provided. See `purrge --help`"),
-        },
+fn handle_events() -> io::Result<bool> {
+    if event::poll(std::time::Duration::from_millis(50))? {
+        if let Event::Key(key) = event::read()? {
+            if key.kind == event::KeyEventKind::Press && key.code == KeyCode::Char('q') {
+                return Ok(true);
+            }
+        }
     }
+    Ok(false)
+}
+
+fn ui(frame: &mut Frame) {
+    let mut state = ListState::default();
+    let items = ["Item 1", "Item 2", "Item 3"];
+    let list = List::new(items)
+        .block(Block::default().title("List").borders(Borders::ALL))
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .highlight_symbol(">>")
+        .repeat_highlight_symbol(true);
+
+    frame.render_stateful_widget(list, frame.size(), &mut state);
+    // frame.render_widget(
+    //     Paragraph::new("Hello World!")
+    //         .block(Block::default().title("Greeting").borders(Borders::ALL)),
+    //     frame.size(),
+    // );
 }
