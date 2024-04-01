@@ -3,6 +3,7 @@ use globset::{Glob, GlobSetBuilder};
 use walkdir::WalkDir;
 
 use std::{
+    fs::remove_dir_all,
     io::{self, stdout},
     path::PathBuf,
 };
@@ -53,14 +54,12 @@ impl App {
 
         builder.add(Glob::new("**/node_modules").unwrap());
         builder.add(Glob::new("**/dist").unwrap());
-        builder.add(Glob::new("**/.git").unwrap());
         let match_these_glob = builder.build().unwrap();
 
         let mut builder2 = GlobSetBuilder::new();
 
         builder2.add(Glob::new("**/node_modules/*").unwrap());
         builder2.add(Glob::new("**/dist/*").unwrap());
-        builder2.add(Glob::new("**/.git/*").unwrap());
         let dont_match_glob = builder2.build().unwrap();
 
         // TODO: don't keep walking when in excluded directory or hidden directory
@@ -100,6 +99,52 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+impl StatefulList {
+    fn next(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                if i >= self.items.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+    fn previous(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.items.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+    fn delete(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                self.items[i].status = Status::InProgress;
+                remove_dir_all(self.items[i].path.to_str().unwrap()).unwrap();
+                self.items[i].status = Status::Deleted;
+
+                if i >= self.items.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+}
+
 impl App {
     fn run(&mut self, mut terminal: Terminal<impl Backend>) -> io::Result<()> {
         loop {
@@ -110,6 +155,13 @@ impl App {
                     use KeyCode::*;
                     match key.code {
                         Char('q') | Esc => return Ok(()),
+                        // Char('h') | Left => self.items.unselect(),
+                        Char('j') | Down => self.items.next(),
+                        Char('k') | Up => self.items.previous(),
+                        Space => self.items.delete(),
+                        // Char('l') | Right | Enter => self.change_status(),
+                        // Char('g') => self.go_top(),
+                        // Char('G') => self.go_bottom(),
                         _ => {}
                     }
                 }
