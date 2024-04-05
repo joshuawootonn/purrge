@@ -1,3 +1,4 @@
+use anyhow::Result;
 use configuration::get_configuration;
 use globset::{Glob, GlobSetBuilder};
 use walkdir::WalkDir;
@@ -7,15 +8,65 @@ use std::{
     io::{self, stdout},
     path::PathBuf,
 };
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crossterm::{
     event::{self, Event, KeyCode},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use ratatui::{prelude::*, style::palette::tailwind, widgets::*};
+use ratatui::{prelude::*, style::palette::tailwind, terminal, widgets::*};
 
 mod configuration;
+
+pub fn initialize_panic_handler() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        shutdown().unwrap();
+        original_hook(panic_info);
+    }));
+}
+
+fn startup() -> Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+    stdout().execute(crossterm::terminal::EnterAlternateScreen)?;
+    Ok(())
+}
+fn shutdown() -> Result<()> {
+    stdout().execute(crossterm::terminal::LeaveAlternateScreen)?;
+    crossterm::terminal::disable_raw_mode()?;
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let configuration = get_configuration();
+
+    let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(action_tx);
+
+    initialize_panic_handler();
+    startup()?;
+
+    app.setup_event_handlers(app.action_tx.clone());
+
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+
+    app.find_directory_items(configuration.directory);
+
+    loop {
+        app.draw(&mut terminal)?;
+
+        if let Some(action) = action_rx.recv().await {
+            app.reducer(action);
+        }
+
+        if app.should_quit {
+            break;
+        }
+    }
+
+    shutdown()
+}
 
 enum Status {
     Initial,
@@ -35,17 +86,45 @@ struct StatefulList {
 }
 
 struct App {
+    should_quit: bool,
     items: StatefulList,
+    action_tx: UnboundedSender<Action>,
+}
+
+struct AddDirectoryAction {
+    path: PathBuf,
+}
+
+struct DeleteDirectoryAction;
+
+struct DeleteDirectoryActionCompleted {
+    path: PathBuf,
+}
+
+struct SelectNextAction;
+struct SelectPrevAction;
+struct QuitAction;
+
+enum Action {
+    AddDirectory(AddDirectoryAction),
+    DeteteDirectory(DeleteDirectoryAction),
+    DeleteDirectoryCompleted(DeleteDirectoryActionCompleted),
+    SelectNext(SelectNextAction),
+    SelectPrev(SelectPrevAction),
+    Quit(QuitAction),
+    None,
 }
 
 impl App {
-    fn new() -> App {
+    fn new(action_tx: UnboundedSender<Action>) -> App {
         App {
             items: StatefulList {
                 state: ListState::default(),
                 items: vec![],
                 last_selected: None,
             },
+            action_tx,
+            should_quit: false,
         }
     }
 
@@ -70,8 +149,6 @@ impl App {
             let b = dont_match_glob.matches(entry.path()).len();
 
             if a > 0 && b == 0 {
-                println!("{:?}", entry.path());
-
                 self.items.items.push(DirectoryItem {
                     path: entry.path().to_path_buf(),
                     status: Status::Initial,
@@ -79,24 +156,52 @@ impl App {
             }
         }
     }
-}
 
-fn main() -> io::Result<()> {
-    let configuration = get_configuration();
+    fn setup_event_handlers(&mut self, tx: UnboundedSender<Action>) -> tokio::task::JoinHandle<()> {
+        let tick_rate = std::time::Duration::from_millis(32);
+        tokio::spawn(async move {
+            loop {
+                let action = if crossterm::event::poll(tick_rate).unwrap() {
+                    if let Ok(Event::Key(key)) = crossterm::event::read() {
+                        if key.kind == event::KeyEventKind::Press {
+                            use KeyCode::*;
+                            match key.code {
+                                Char('q') | Esc => Action::Quit(QuitAction),
+                                Char('j') | Down => Action::SelectNext(SelectNextAction),
+                                Char('k') | Up => Action::SelectPrev(SelectPrevAction),
+                                Space => Action::DeteteDirectory(DeleteDirectoryAction),
+                                _ => Action::None,
+                            }
+                        } else {
+                            Action::None
+                        }
+                    } else {
+                        Action::None
+                    }
+                } else {
+                    Action::None
+                };
+                if tx.send(action).is_err() {
+                    break;
+                }
+            }
+        })
+    }
 
-    let mut app = App::new();
+    fn reducer(&mut self, action: Action) {
+        match action {
+            Action::SelectNext(_) => self.items.next(),
+            Action::SelectPrev(_) => self.items.previous(),
+            Action::DeteteDirectory(_) => self.items.delete(),
+            Action::Quit(_) => self.should_quit = true,
+            _ => {}
+        }
+    }
 
-    enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-
-    app.find_directory_items(configuration.directory);
-
-    app.run(terminal);
-
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
-    Ok(())
+    fn draw(&mut self, terminal: &mut Terminal<impl Backend>) -> io::Result<()> {
+        terminal.draw(|f| f.render_widget(self, f.size()))?;
+        Ok(())
+    }
 }
 
 impl StatefulList {
@@ -142,36 +247,6 @@ impl StatefulList {
             None => 0,
         };
         self.state.select(Some(i));
-    }
-}
-
-impl App {
-    fn run(&mut self, mut terminal: Terminal<impl Backend>) -> io::Result<()> {
-        loop {
-            self.draw(&mut terminal);
-
-            if let Event::Key(key) = event::read()? {
-                if key.kind == event::KeyEventKind::Press {
-                    use KeyCode::*;
-                    match key.code {
-                        Char('q') | Esc => return Ok(()),
-                        // Char('h') | Left => self.items.unselect(),
-                        Char('j') | Down => self.items.next(),
-                        Char('k') | Up => self.items.previous(),
-                        Space => self.items.delete(),
-                        // Char('l') | Right | Enter => self.change_status(),
-                        // Char('g') => self.go_top(),
-                        // Char('G') => self.go_bottom(),
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    fn draw(&mut self, terminal: &mut Terminal<impl Backend>) -> io::Result<()> {
-        terminal.draw(|f| f.render_widget(self, f.size()))?;
-        Ok(())
     }
 }
 
